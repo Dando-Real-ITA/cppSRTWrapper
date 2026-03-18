@@ -228,8 +228,15 @@ void SRTNet::serverEventHandler() {
 
                 std::lock_guard<std::mutex> lock(mClientListMtx);
                 auto iterator = mClientList.find(thisSocket);
-                if (result == SRT_ERROR) {
-                    SRT_LOGGER(true, LOGG_ERROR, "srt_recvmsg error: " << result << " " << srt_getlasterror_str());
+                
+                // Handle disconnect: result == 0 means clean close, result == SRT_ERROR means error
+                if (result == 0 || result == SRT_ERROR) {
+                    if (result == SRT_ERROR) {
+                        SRT_LOGGER(true, LOGG_ERROR, "srt_recvmsg error: " << srt_getlasterror_str());
+                    } else {
+                        SRT_LOGGER(true, LOGG_NOTIFY, "Client " << thisSocket << " closed connection cleanly");
+                    }
+                    
                     if (iterator == mClientList.end()) {
                         continue; // This client has already been removed by closeAllClientSockets()
                     }
@@ -291,24 +298,24 @@ void SRTNet::waitForSRTClient(bool singleSender) {
             const int events = SRT_EPOLL_IN | SRT_EPOLL_ERR;
             std::lock_guard<std::mutex> lock(mClientListMtx);
             
-            // Check if this socket was already in use (socket handle reuse case)
-            auto existingIterator = mClientList.find(newSocketCandidate);
-            if (existingIterator != mClientList.end()) {
-                // Remove old client from epoll and close it
-                SRT_LOGGER(true, LOGG_NOTIFY, "Socket handle " << newSocketCandidate << " reused - removing old client");
-                srt_epoll_remove_usock(mPollID, newSocketCandidate);
-                srt_close(newSocketCandidate);
-                auto oldCtx = existingIterator->second;
-                mClientList.erase(existingIterator);
-                if (clientDisconnected) {
-                    clientDisconnected(oldCtx, newSocketCandidate);
+            // Check if socket is already in the list (shouldn't happen, but be safe)
+            if (mClientList.count(newSocketCandidate) > 0) {
+                SRT_LOGGER(true, LOGG_WARN, "Socket " << newSocketCandidate << " already exists in client list, replacing");
+                // Remove the old one from epoll first
+                result = srt_epoll_remove_usock(mPollID, newSocketCandidate);
+                if (result == SRT_ERROR) {
+                    SRT_LOGGER(true, LOGG_WARN, "Failed to remove existing socket from epoll: " << srt_getlasterror_str());
                 }
+                mClientList.erase(newSocketCandidate);
             }
             
             mClientList[newSocketCandidate] = ctx;
             result = srt_epoll_add_usock(mPollID, newSocketCandidate, &events);
             if (result == SRT_ERROR) {
                 SRT_LOGGER(true, LOGG_FATAL, "srt_epoll_add_usock error: " << srt_getlasterror_str());
+                // Clean up on failure
+                mClientList.erase(newSocketCandidate);
+                srt_close(newSocketCandidate);
             }
 
             if (singleSender) {

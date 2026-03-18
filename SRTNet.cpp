@@ -240,11 +240,20 @@ void SRTNet::serverEventHandler() {
                     if (clientDisconnected) {
                         clientDisconnected(ctx, thisSocket);
                     }
-                } else if (result > 0 && receivedData) {
-                    auto pointer = std::make_unique<std::vector<uint8_t>>(msg, msg + result);
-                    receivedData(pointer, thisMSGCTRL, iterator->second, thisSocket);
-                } else if (result > 0 && receivedDataNoCopy) {
-                    receivedDataNoCopy(msg, result, thisMSGCTRL, iterator->second, thisSocket);
+                } else if (result > 0) {
+                    if (iterator == mClientList.end()) {
+                        // Socket received data but is not in our client list - remove it from epoll
+                        SRT_LOGGER(true, LOGG_WARN, "Received data from unknown socket, removing from epoll");
+                        srt_epoll_remove_usock(mPollID, thisSocket);
+                        srt_close(thisSocket);
+                        continue;
+                    }
+                    if (receivedData) {
+                        auto pointer = std::make_unique<std::vector<uint8_t>>(msg, msg + result);
+                        receivedData(pointer, thisMSGCTRL, iterator->second, thisSocket);
+                    } else if (receivedDataNoCopy) {
+                        receivedDataNoCopy(msg, result, thisMSGCTRL, iterator->second, thisSocket);
+                    }
                 }
             }
             if (mClientList.empty()) {
@@ -281,6 +290,21 @@ void SRTNet::waitForSRTClient(bool singleSender) {
         if (ctx) {
             const int events = SRT_EPOLL_IN | SRT_EPOLL_ERR;
             std::lock_guard<std::mutex> lock(mClientListMtx);
+            
+            // Check if this socket was already in use (socket handle reuse case)
+            auto existingIterator = mClientList.find(newSocketCandidate);
+            if (existingIterator != mClientList.end()) {
+                // Remove old client from epoll and close it
+                SRT_LOGGER(true, LOGG_NOTIFY, "Socket handle " << newSocketCandidate << " reused - removing old client");
+                srt_epoll_remove_usock(mPollID, newSocketCandidate);
+                srt_close(newSocketCandidate);
+                auto oldCtx = existingIterator->second;
+                mClientList.erase(existingIterator);
+                if (clientDisconnected) {
+                    clientDisconnected(oldCtx, newSocketCandidate);
+                }
+            }
+            
             mClientList[newSocketCandidate] = ctx;
             result = srt_epoll_add_usock(mPollID, newSocketCandidate, &events);
             if (result == SRT_ERROR) {
@@ -295,7 +319,7 @@ void SRTNet::waitForSRTClient(bool singleSender) {
                 break;
             }
         } else {
-            close(newSocketCandidate);
+            srt_close(newSocketCandidate);
         }
     }
 }

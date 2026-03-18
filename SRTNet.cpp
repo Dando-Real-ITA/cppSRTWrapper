@@ -263,9 +263,6 @@ void SRTNet::serverEventHandler() {
                     }
                 }
             }
-            if (mClientList.empty()) {
-                break;
-            }
         } else if (ret == -1) {
             SRT_LOGGER(true, LOGG_ERROR, "epoll error: " << srt_getlasterror_str());
         }

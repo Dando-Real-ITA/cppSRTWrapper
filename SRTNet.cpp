@@ -297,25 +297,10 @@ void SRTNet::waitForSRTClient(bool singleSender) {
         if (ctx) {
             const int events = SRT_EPOLL_IN | SRT_EPOLL_ERR;
             std::lock_guard<std::mutex> lock(mClientListMtx);
-            
-            // Check if socket is already in the list (shouldn't happen, but be safe)
-            if (mClientList.count(newSocketCandidate) > 0) {
-                SRT_LOGGER(true, LOGG_WARN, "Socket " << newSocketCandidate << " already exists in client list, replacing");
-                // Remove the old one from epoll first
-                result = srt_epoll_remove_usock(mPollID, newSocketCandidate);
-                if (result == SRT_ERROR) {
-                    SRT_LOGGER(true, LOGG_WARN, "Failed to remove existing socket from epoll: " << srt_getlasterror_str());
-                }
-                mClientList.erase(newSocketCandidate);
-            }
-            
             mClientList[newSocketCandidate] = ctx;
             result = srt_epoll_add_usock(mPollID, newSocketCandidate, &events);
             if (result == SRT_ERROR) {
                 SRT_LOGGER(true, LOGG_FATAL, "srt_epoll_add_usock error: " << srt_getlasterror_str());
-                // Clean up on failure
-                mClientList.erase(newSocketCandidate);
-                srt_close(newSocketCandidate);
             }
 
             if (singleSender) {
@@ -516,9 +501,13 @@ void SRTNet::clientWorker() {
         uint8_t msg[2048];
         SRT_MSGCTRL thisMSGCTRL = srt_msgctrl_default;
         int result = srt_recvmsg2(mContext, reinterpret_cast<char*>(msg), sizeof(msg), &thisMSGCTRL);
-        if (result == SRT_ERROR) {
-            if (mClientActive) {
+        
+        // Handle disconnect: result == 0 means clean close, result == SRT_ERROR means error
+        if (result == 0 || result == SRT_ERROR) {
+            if (result == SRT_ERROR && mClientActive) {
                 SRT_LOGGER(true, LOGG_ERROR, "srt_recvmsg error: " << srt_getlasterror_str());
+            } else if (result == 0) {
+                SRT_LOGGER(true, LOGG_NOTIFY, "Server closed connection cleanly");
             }
             if (clientDisconnected) {
                 clientDisconnected(mClientContext, mContext);

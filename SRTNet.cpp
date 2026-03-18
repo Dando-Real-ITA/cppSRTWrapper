@@ -221,13 +221,23 @@ void SRTNet::serverEventHandler() {
 
         if (ret > 0) {
             for (size_t i = 0; i < ret; i++) {
-                uint8_t msg[2048];
-                SRT_MSGCTRL thisMSGCTRL = srt_msgctrl_default;
                 SRTSOCKET thisSocket = ready[i].fd;
-                int result = srt_recvmsg2(thisSocket, reinterpret_cast<char*>(msg), sizeof(msg), &thisMSGCTRL);
-
+                
                 std::lock_guard<std::mutex> lock(mClientListMtx);
                 auto iterator = mClientList.find(thisSocket);
+                
+                // If socket is not in our client list, remove it from epoll and skip
+                if (iterator == mClientList.end()) {
+                    SRT_LOGGER(true, LOGG_WARN, "Received event for unknown socket " << thisSocket << ", removing from epoll");
+                    srt_epoll_remove_usock(mPollID, thisSocket);
+                    srt_close(thisSocket);
+                    continue;
+                }
+                
+                // Socket is in our list, try to receive data
+                uint8_t msg[2048];
+                SRT_MSGCTRL thisMSGCTRL = srt_msgctrl_default;
+                int result = srt_recvmsg2(thisSocket, reinterpret_cast<char*>(msg), sizeof(msg), &thisMSGCTRL);
                 
                 // Handle disconnect: result == 0 means clean close, result == SRT_ERROR means error
                 if (result == 0 || result == SRT_ERROR) {
@@ -237,9 +247,6 @@ void SRTNet::serverEventHandler() {
                         SRT_LOGGER(true, LOGG_NOTIFY, "Client " << thisSocket << " closed connection cleanly");
                     }
                     
-                    if (iterator == mClientList.end()) {
-                        continue; // This client has already been removed by closeAllClientSockets()
-                    }
                     auto ctx = iterator->second;
                     mClientList.erase(iterator->first);
                     srt_epoll_remove_usock(mPollID, thisSocket);
@@ -248,13 +255,6 @@ void SRTNet::serverEventHandler() {
                         clientDisconnected(ctx, thisSocket);
                     }
                 } else if (result > 0) {
-                    if (iterator == mClientList.end()) {
-                        // Socket received data but is not in our client list - remove it from epoll
-                        SRT_LOGGER(true, LOGG_WARN, "Received data from unknown socket, removing from epoll");
-                        srt_epoll_remove_usock(mPollID, thisSocket);
-                        srt_close(thisSocket);
-                        continue;
-                    }
                     if (receivedData) {
                         auto pointer = std::make_unique<std::vector<uint8_t>>(msg, msg + result);
                         receivedData(pointer, thisMSGCTRL, iterator->second, thisSocket);
